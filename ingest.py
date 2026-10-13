@@ -1,86 +1,75 @@
-"""Index markdown locally: python ingest.py [--data-dir PATH] [--db-path PATH]."""
+"""Incrementally index local files through the same pipeline as uploads."""
 import argparse
-import re
-import sqlite3
+import time
 from pathlib import Path
-
-import numpy as np
-
-from app.core.config import DATA_DIR, DB_PATH
-from app.services.search_service import encode_texts, SearchServiceError
-
-
-def chunk_markdown(content: str, fallback_title: str, max_words: int = 180):
-    """Preserve heading citations; split long paragraphs into bounded chunks."""
-    title = fallback_title
-    section = "Introduction"
-    paragraphs = []
-    buffer = []
-
-    def flush():
-        if buffer:
-            words = " ".join(buffer).split()
-            for start in range(0, len(words), max_words):
-                paragraphs.append((title, section, " ".join(words[start:start + max_words])))
-            buffer.clear()
-
-    for line in content.splitlines():
-        heading = re.match(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$", line)
-        if heading:
-            flush()
-            if len(heading.group(1)) == 1:
-                title = heading.group(2)
-            section = heading.group(2)
-        elif not line.strip():
-            flush()
-        else:
-            buffer.append(line.strip())
-    flush()
-    return paragraphs
+from fastapi import HTTPException
+from app.core.config import DATA_DIR, Settings
+from app.ingestion.pipeline import PARSERS
+from app.services.context import Context
 
 
-def ingest(data_dir: Path = DATA_DIR, db_path: Path = DB_PATH) -> int:
-    data_dir, db_path = Path(data_dir), Path(db_path)
-    paths = sorted(data_dir.rglob("*.md")) if data_dir.is_dir() else []
+def ingest(data_dir=DATA_DIR, db_path=None, context=None):
+    data_dir = Path(data_dir).resolve()
+    paths = sorted(path for path in data_dir.rglob('*') if path.is_file() and path.suffix.lower() in PARSERS) if data_dir.is_dir() else []
     if not paths:
-        raise ValueError(f"No markdown files found in {data_dir}")
-    chunks = []
+        raise ValueError(f'No supported documents found in {data_dir}')
+    context = context or Context(Settings(**({'db_path': Path(db_path)} if db_path else {})))
+    owner = 'local'
+    prefix = 'cli:' + str(data_dir) + ':'
+    keys, job_ids = set(), []
     for path in paths:
-        source = path.relative_to(data_dir).as_posix()
-        for title, section, text in chunk_markdown(path.read_text(encoding="utf-8"), path.stem):
-            chunks.append((source, title, section, text))
-    if not chunks:
-        raise ValueError("Markdown files contain no indexable paragraphs")
-    # Finish model work before replacing the existing index.
-    embeddings = encode_texts([chunk[3] for chunk in chunks])
-    if embeddings.ndim != 2 or len(embeddings) != len(chunks) or not np.isfinite(embeddings).all():
-        raise ValueError("Model returned invalid embeddings")
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("""CREATE TABLE IF NOT EXISTS chunks (
-            id INTEGER PRIMARY KEY,
-            source_path TEXT NOT NULL,
-            source_title TEXT NOT NULL,
-            section TEXT NOT NULL,
-            text TEXT NOT NULL,
-            embedding BLOB NOT NULL
-        )""")
-        conn.execute("DELETE FROM chunks")
-        conn.executemany(
-            "INSERT INTO chunks (source_path, source_title, section, text, embedding) VALUES (?, ?, ?, ?, ?)",
-            [(*chunk, sqlite3.Binary(vector.astype(np.float32).tobytes()))
-             for chunk, vector in zip(chunks, embeddings)],
-        )
-    return len(chunks)
+        key = prefix + path.relative_to(data_dir).as_posix()
+        keys.add(key)
+        with context.db.connect() as conn:
+            row = conn.execute('SELECT id,version,content_hash FROM documents WHERE owner_id=? AND source_key=? AND deleted_at IS NULL', (owner, key)).fetchone()
+        if path.stat().st_size > context.settings.max_upload_bytes:
+            raise ValueError(f'{path.name} exceeds the upload limit')
+        data = path.read_bytes()
+        if row:
+            result = context.documents.upload(owner, path.name, data, row['id'], row['version'])
+        else:
+            result = context.documents.upload(owner, path.name, data, source_key=key)
+        if result['job_id']:
+            job_ids.append(result['job_id'])
+    # Only prune documents managed by this CLI input root; user uploads are untouched.
+    with context.db.connect() as conn:
+        managed = conn.execute('SELECT id,source_key FROM documents WHERE owner_id=? AND deleted_at IS NULL', (owner,)).fetchall()
+    for row in managed:
+        if row['source_key'] and row['source_key'].startswith(prefix) and row['source_key'] not in keys:
+            context.documents.delete(row['id'], owner)
+        elif row['source_key'] and row['source_key'].startswith('legacy:') and any(path.name == row['source_key'][7:] for path in paths):
+            context.documents.delete(row['id'], owner)
+    acquired = context.worker.acquire()
+    try:
+        for identifier in job_ids:
+            deadline = time.monotonic() + 600
+            while True:
+                with context.db.connect() as conn:
+                    job = conn.execute('SELECT * FROM jobs WHERE id=?', (identifier,)).fetchone()
+                if job['status'] in {'completed', 'failed', 'cancelled'}:
+                    if job['status'] != 'completed':
+                        raise ValueError(job['error'] or job['status'])
+                    break
+                if time.monotonic() > deadline:
+                    raise ValueError('Indexing wait timed out; check the jobs endpoint')
+                if acquired:
+                    context.worker.run_once()
+                else:
+                    time.sleep(0.2)
+    finally:
+        if acquired:
+            context.worker.close()
+    with context.db.connect() as conn:
+        return conn.execute('SELECT COUNT(*) FROM chunks WHERE owner_id=?', (owner,)).fetchone()[0]
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Build the local PocketSyllabus index")
-    parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
-    parser.add_argument("--db-path", type=Path, default=DB_PATH)
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Incrementally index Markdown, TXT, PDF and DOCX')
+    parser.add_argument('--data-dir', type=Path, default=DATA_DIR)
+    parser.add_argument('--db-path', type=Path)
     args = parser.parse_args()
     try:
         count = ingest(args.data_dir, args.db_path)
-    except (ValueError, OSError, sqlite3.Error, SearchServiceError) as exc:
-        parser.exit(1, f"Indexing failed: {exc}\n")
-    print(f"Indexed {count} chunks into {args.db_path}")
+    except (ValueError, OSError, HTTPException) as exc:
+        parser.exit(1, f'Indexing failed: {getattr(exc, "detail", str(exc))}\n')
+    print(f'Library contains {count} searchable chunks')

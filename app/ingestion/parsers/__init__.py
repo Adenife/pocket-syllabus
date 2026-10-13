@@ -1,0 +1,1 @@
+"""PocketSyllabus application module."""

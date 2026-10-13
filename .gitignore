@@ -2,3 +2,9 @@
 __pycache__/
 *.py[cod]
 .streamlit/secrets.toml
+data/uploads/
+database/*.db*
+database/*.lock
+database/indexes/
+database/sync-*
+.env

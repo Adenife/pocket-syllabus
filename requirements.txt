@@ -1,7 +1,14 @@
 fastapi
 uvicorn
-streamlit
+streamlit>=1.65
 sentence-transformers
 numpy
 pydantic>=2
 requests
+pypdf
+python-docx
+faiss-cpu
+cryptography
+python-multipart
+markdown-it-py
+portalocker

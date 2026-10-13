@@ -1,124 +1,125 @@
 # PocketSyllabus
 
-PocketSyllabus is a low-bandwidth, offline-first discovery engine for locally
-stored Open Educational Resource (OER) study materials. It turns Markdown
-syllabi and textbook excerpts into a searchable SQLite index, retrieves relevant
-paragraphs using semantic embeddings, and lets readers save cited excerpts as
-plain-text files.
+PocketSyllabus is a local-first study library for textbooks, syllabi, and notes.
+Upload your materials, let them index in the background, then search by meaning
+or keyword and save cited excerpts for offline reading.
 
-The application has three parts: a standalone ingestion CLI, a modular FastAPI
-backend, and a Streamlit frontend. Once dependencies and the embedding model
-are cached, ingestion and search can operate without internet access.
+The application includes a modular FastAPI backend, a Streamlit interface,
+durable SQLite storage, CPU embedding generation, a cached FAISS vector index,
+and a synchronization CLI. You can use it on one computer without accounts, or
+enable isolated user accounts for a hosted deployment.
 
 ## Contents
 
 - [Features](#features)
-- [Architecture](#architecture)
-- [Project structure](#project-structure)
-- [Requirements](#requirements)
+- [Architecture and project structure](#architecture)
 - [Installation](#installation)
 - [Quick start](#quick-start)
-- [Adding study materials](#adding-study-materials)
-- [Ingestion and database](#ingestion-and-database)
-- [API reference](#api-reference)
+- [Everyday workflow](#everyday-workflow)
+- [Supported documents and chunking](#supported-documents-and-chunking)
+- [Indexing and local-folder ingestion](#indexing-and-local-folder-ingestion)
+- [Search and scaling](#search-and-scaling)
+- [API](#api)
 - [Offline operation](#offline-operation)
+- [Accounts and security](#accounts-and-security)
+- [Synchronization](#synchronization)
+- [Backup and restore](#backup-and-restore)
 - [Configuration](#configuration)
-- [Tests](#tests)
+- [Tests and verification](#tests-and-verification)
+- [Deployment](#deployment)
 - [Troubleshooting](#troubleshooting)
-- [Limitations and development](#limitations-and-development)
 - [Licensing](#licensing)
 
 ## Features
 
-- Semantic search using `sentence-transformers/all-MiniLM-L6-v2`.
-- Local Markdown ingestion with paragraph chunking and heading citations.
-- SQLite persistence with NumPy `float32` embedding blobs.
-- Cosine similarity ranking with configurable result limits.
-- Versioned HTTP search endpoint with Pydantic validation.
-- Streamlit search interface with source titles, sections, and similarity scores.
-- Individual `.txt` excerpt downloads for offline reading.
-- Offline regression tests that avoid downloading the embedding model.
+- Upload Markdown, UTF-8 text, searchable PDF, and DOCX files.
+- Write and edit notes directly in the Library tab.
+- List, replace, reindex, download, and delete documents.
+- Background indexing with persistent jobs and restart recovery.
+- Model-token-aware chunking, overlap, heading paths, and page/line citations.
+- Bounded embedding batches and incremental per-document replacement.
+- Cached exact vector search for small libraries; HNSW for larger libraries.
+- Optional hybrid semantic/SQLite full-text retrieval and document filters.
+- Account registration, password hashing, expiring/revocable bearer sessions,
+  owner isolation, upload quotas, and request rate limits.
+- Optional encryption of originals, extracted text, embeddings, and saved indexes.
+- Two-way original-file synchronization with resumable transfers, version checks,
+  deletion tombstones, and conflict reporting.
+- Consistent database/original-file backup and restore tooling.
 
 ## Architecture
 
 ```text
-Markdown files in data/
-        |
-        v
-  ingest.py --> embedding model --> database/syllabus.db
-                                         |
-Browser --> Streamlit --> FastAPI --> SearchService
-                                         |
-                            embed query, compare chunks,
-                            rank by cosine similarity
+Library upload / note / ingest.py
+             |
+   validate and persist original
+             |
+    durable SQLite job queue
+             |
+      single indexing worker
+             |
+  format parser -> token chunker -> embedding batches -> staging rows
+             |
+   atomic replacement of one document's searchable chunks
+             |
+ cached FAISS index + optional SQLite full-text search
+             |
+  FastAPI -> Streamlit -> cited excerpts / original downloads
 ```
 
-The frontend sends requests only to the local backend. Search embeds the query,
-reads the stored chunks, computes cosine similarity, and returns the highest
-scoring excerpts. No generative model or remote search service is involved.
-
-The model is loaded lazily and cached in the backend process. The health endpoint
-works without loading it. SQLite connections are opened per operation, and search
-uses read-only connections. An application lock serializes embedding generation
-within each process.
+SQLite is the source of truth. Vector index files are disposable snapshots.
+Generations invalidate caches after indexing or deletion. Search loads vector
+snapshots once, then fetches text only for the winning chunks. Filters and owner
+boundaries are applied before vector retrieval, not after ranking.
 
 ## Project structure
 
 ```text
 pocket-syllabus/
-├── .gitignore
-├── README.md
+├── app.py                         # Streamlit entry point
+├── ingest.py                      # Incremental local-folder ingestion
+├── sync.py                        # Two-way synchronization CLI
+├── backup.py                      # Backup/restore CLI
 ├── requirements.txt
 ├── requirements-dev.txt
-├── ingest.py
-├── app.py                         # Streamlit client
+├── app/
+│   ├── main.py                    # App factory, lifespan, health/readiness
+│   ├── core/                      # Settings, security, middleware, logging
+│   ├── api/v1/endpoints/           # Documents, jobs, search, accounts, sync
+│   ├── schemas/                   # API validation and serialization
+│   ├── ingestion/
+│   │   ├── parsers/                # Markdown, TXT, PDF, DOCX
+│   │   ├── chunker.py
+│   │   └── pipeline.py
+│   ├── services/                  # Documents, ingestion, embeddings, search, sync
+│   ├── storage/                   # Database, repositories, FAISS snapshots
+│   └── workers/indexing_worker.py
+├── frontend/                      # Client, library, search, settings
 ├── data/
-│   └── sample_syllabus.md
+│   ├── samples/sample_syllabus.md
+│   └── uploads/                   # Private runtime files, ignored by Git
 ├── database/
-│   └── syllabus.db
-├── app/                           # FastAPI package
-│   ├── __init__.py
-│   ├── main.py
-│   ├── core/
-│   │   ├── __init__.py
-│   │   └── config.py
-│   ├── api/
-│   │   ├── __init__.py
-│   │   └── v1/
-│   │       ├── __init__.py
-│   │       └── endpoints/
-│   │           ├── __init__.py
-│   │           └── search.py
-│   ├── schemas/
-│   │   ├── __init__.py
-│   │   └── resource.py
-│   └── services/
-│       ├── __init__.py
-│       └── search_service.py
+│   ├── migrations/001_library.sql
+│   ├── syllabus.db                # Runtime database, ignored by Git
+│   └── indexes/                   # Derived snapshots, ignored by Git
+├── deployment/                    # Dockerfile and Compose configuration
 └── tests/
-    ├── README.md
-    ├── test_project.py
-    └── test_frontend.py
+    ├── unit/
+    ├── integration/
+    ├── ui/
+    ├── fixtures/
+    ├── helpers.py
+    └── benchmark_search.py
 ```
 
-`.venv/` and Python cache files are ignored by Git. The supplied SQLite file is
-an empty starter database; run ingestion to create its schema and populate it.
-
-## Requirements
-
-- Python 3.12 is the version used for local verification.
-- A Python virtual environment and a package installer such as pip or uv.
-- Internet access for the initial dependency installation and model download.
-- Disk space for PyTorch, other dependencies, the model cache, and the index.
-- A web browser for the Streamlit interface.
-
-A GPU is not required. SQLite is included with Python. Application dependencies
-are FastAPI, Uvicorn, Streamlit, Sentence Transformers, NumPy, Pydantic, and
-Requests. HTTPX is included in the development requirements for API tests.
+User uploads, runtime databases/indexes, environment files, and synchronization
+checkpoints are excluded from Git. Sample materials are original mock curriculum
+text for testing.
 
 ## Installation
 
-Run commands from the project root:
+Python 3.12 was used for verification. A GPU is not required. Dependencies and
+model weights need internet access on first installation.
 
 ```bash
 cd pocket-syllabus
@@ -128,325 +129,436 @@ python -m pip install -r requirements.txt
 ```
 
 On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1`.
+If Ubuntu/Debian reports missing `ensurepip`, install the matching venv package
+(for example `sudo apt install python3.12-venv`) and recreate the environment.
 
-If Debian or Ubuntu reports that `ensurepip` is unavailable, install the virtual
-environment package matching your Python version, for example:
-
-```bash
-sudo apt install python3.12-venv
-```
-
-Then rerun the environment creation command.
-
-If using uv, an alternative installation is:
+Alternatively, with uv and CPU-only PyTorch:
 
 ```bash
 uv venv --python 3.12 .venv
 source .venv/bin/activate
-uv pip install -r requirements.txt
-```
-
-For CPU-only PyTorch with uv, install it first from the CPU package index:
-
-```bash
 uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 uv pip install -r requirements.txt
 ```
 
-The existing local environment was installed with CPU-only PyTorch. A default
-installation on another machine may select a different PyTorch distribution.
-
 ## Quick start
 
-### 1. Build the local index
-
-With the virtual environment active:
+Optionally index the included sample to download/cache the model:
 
 ```bash
 python ingest.py
 ```
 
-The first run downloads and caches the embedding model. The included original
-sample material covers introductory physics and biology and produces 13 chunks
-with the current chunking rules.
-
-### 2. Start the backend
+Start the API:
 
 ```bash
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Keep this terminal running. Visit `http://127.0.0.1:8000/` to check backend health,
-or `http://127.0.0.1:8000/docs` to try the interactive API documentation.
-
-### 3. Start the frontend
-
-In a second terminal, enter the project directory and activate the environment:
+In another terminal, activate the same environment and start the interface:
 
 ```bash
-source .venv/bin/activate
-streamlit run app.py --server.address 127.0.0.1
+streamlit run app.py --server.address 127.0.0.1 --browser.gatherUsageStats false
 ```
 
-Open the local address printed by Streamlit, normally `http://127.0.0.1:8501`.
-Search for a topic such as “How does photosynthesis work?” or “Newton's laws”.
-Choose between 1 and 10 results in the interface.
+Open [PocketSyllabus](http://127.0.0.1:8501). In **Library**, upload textbooks or
+notes, or write a note. Status progresses from `queued` to `indexing` to `ready`;
+the view refreshes every five seconds. Failed extraction or model loading is
+shown with an error. After indexing, search in the **Search** tab.
 
-Each result includes its source title, section, excerpt, and similarity score.
-Select **Save Excerpt for Offline Reading (.txt)** to download the excerpt and
-its citation. Results remain visible across frontend reruns within the session.
+Select documents to narrow a search, or leave the selection empty for the whole
+library. The selector shows the latest 100 documents; the API supports explicit
+filters for any accessible document. Each result includes section, filename,
+and page or line location when available. Download an excerpt as `.txt`, or
+prepare a download of the original from the Library.
 
-Stop each server with `Ctrl+C` in its terminal.
+Text/Markdown documents have an **Edit note** action. Any document can be
+replaced by an updated file. Concurrent replacements are rejected with a version
+conflict. A previous successful index stays searchable if a replacement fails.
 
-## Adding study materials
+Deletion requires selecting the confirmation checkbox. It removes the current
+original, chunks, and saved vector snapshots, and cancels pending indexing.
+Minimal deletion/version metadata remains for synchronization. Stop each server
+with `Ctrl+C`.
 
-Place UTF-8 `.md` files in `data/`; nested directories are supported. Use a
-level-one heading for the source title and smaller headings for sections:
+## Everyday workflow
 
-```markdown
-# Introductory Biology
+1. Open **Library** and select one or more textbooks or notes, then click
+   **Upload and index**. The displayed per-file limit comes from the backend.
+2. Watch the document status. While indexing, its details show the current stage
+   and the number of chunks processed. Wait for `ready` before searching a new file.
+3. Open **Search**, enter a question, and optionally select documents. Keyword
+   matches are enabled by default; turn them off for semantic-only retrieval.
+4. Read the source citation and download useful excerpts for offline reading.
+5. To update materials, expand a Library entry and replace its file. For text
+   or Markdown, use **Edit note**, edit the content, and click **Save changes**.
+6. If indexing fails, read the error, correct the problem, and use **Reindex**.
+   An earlier successful version remains searchable; it may differ from the
+   currently uploaded original until the new version finishes indexing.
 
-## Cell Structure
+For a new note, expand **Write a note**, enter a title and content, then choose
+**Save and index note**. Notes support Markdown headings, lists, and code blocks.
+Identical uploads are detected within the same owner's library and return the
+existing document rather than another indexing job.
 
-Cells are the basic units of life. Their membranes regulate transport.
+The sample syllabus is optional demonstration content. Your own materials are
+stored separately in `data/uploads/`; you do not need to edit or replace the sample.
 
-## Photosynthesis
+## Supported documents and chunking
 
-Plants use light energy to synthesize sugars from carbon dioxide and water.
-```
-
-Separate paragraphs with blank lines, then rebuild the index:
-
-```bash
-python ingest.py
-```
-
-If a document has no level-one heading, its filename stem supplies the title.
-Text before a heading uses the section `Introduction`. Each encountered heading
-sets the current section; citations retain that heading rather than a complete
-hierarchical heading path.
-
-Only local Markdown is supported. The application does not crawl websites,
-extract PDFs, discover licenses, or download resources automatically. Keep
-source URLs, author attribution, and license information in your materials where
-appropriate; the application does not have dedicated metadata fields for them.
-
-## Ingestion and database
-
-The CLI reads `.md` files recursively, combines lines into paragraphs, and splits
-paragraphs longer than 180 whitespace-separated words into consecutive chunks.
-It encodes all chunks and stores the results in SQLite.
-
-```bash
-python ingest.py --help
-python ingest.py --data-dir ./data --db-path ./database/syllabus.db
-```
-
-| Column in `chunks` | Purpose |
+| Format | Extraction and citations |
 | --- | --- |
-| `id` | Integer primary key |
-| `source_path` | Markdown path relative to the input directory |
-| `source_title` | Document title |
-| `section` | Current heading or `Introduction` |
-| `text` | Chunk text |
-| `embedding` | NumPy `float32` vector stored as a BLOB |
+| `.md` | CommonMark parser, heading paths, original line locations, fenced code |
+| `.txt` | UTF-8 paragraphs with starting line numbers |
+| `.pdf` | Extractable text per page and one-based page numbers |
+| `.docx` | Paragraphs, heading paths, and table rows; no rendered page numbers |
 
-Ingestion rebuilds the entire chunk collection; it is not incremental. Removed
-materials disappear after a successful rebuild, and repeated ingestion does not
-accumulate duplicate rows. Chunk IDs can change after rebuilding and should not
-be treated as permanent source identifiers.
+Scanned PDFs need OCR before uploading. Password-protected PDFs are rejected.
+The pipeline reports pages with no extracted text. PDF layout, equations, and
+complex tables may extract imperfectly; inspect important source passages.
 
-Embeddings are generated and checked before existing rows are replaced. Model
-failures and invalid embedding arrays leave an existing index intact. The
-replacement inserts are committed together in a SQLite transaction.
+Chunks respect the embedding model's token window, including special tokens.
+The default requested budget is 220 content tokens, with up to 32 overlapping
+tokens; the effective budget is capped by the model. Long blocks prefer sentence
+boundaries where possible. Code whitespace is retained. Overlap stays within a
+block rather than joining unrelated headings or pages. Line citations identify
+the starting source block and may repeat across windows from that block.
 
-A custom `--db-path` affects ingestion only. To search that database, also update
-`DB_PATH` in `app/core/config.py` and restart the backend.
+The default file limit is 50 MiB, library quota 1 GiB, and document limit 1,000 per
+owner. These include original sizes, not total database or model-cache disk use.
 
-## API reference
-
-### `GET /`
-
-Returns backend health:
-
-```json
-{"status": "ok", "app": "PocketSyllabus"}
-```
-
-This confirms that the server responds; it does not verify model or index readiness.
-
-### `POST /api/v1/search`
+## Indexing and local-folder ingestion
 
 ```bash
+python ingest.py --data-dir ./data/samples
+python ingest.py --data-dir /path/to/study-materials --db-path ./database/syllabus.db
+```
+
+Files are indexed recursively, one document at a time. Unchanged content is
+skipped using SHA-256 hashes. Only documents managed by the same CLI input root
+are pruned when files disappear; uploads through the API are preserved.
+
+Originals use generated filenames. Embeddings are generated in batches and
+written to `staged_chunks`; only a completed job replaces active chunks in one
+SQLite transaction. Malformed data, model failure, or cancellation leaves a
+previous index intact. Recovery resets interrupted jobs and discards partial
+staging rows before retrying. After three interrupted attempts, the job is marked
+failed for manual inspection and reindexing.
+
+The API runs one background worker by default. A process lock prevents a second
+worker from claiming the same library. To run a standalone worker instead:
+
+```bash
+export POCKET_WORKER_ENABLED=0
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+# In another terminal with the same storage settings:
+python -m app.workers.indexing_worker
+```
+
+Do not start several API workers for this configuration; rate limits and index
+caches are process-local. Embedding batches are bounded, but individual files
+are capped and may be held in memory during upload or parsing. PDF processing is
+page-based; DOCX expanded size is capped at 100 MiB. Vector indexes themselves
+still require memory proportional to the library.
+
+Older project databases are migrated automatically to document records without
+losing searchable chunks. Legacy entries lack uploaded originals until the
+sample is reingested or a new original is uploaded. Back up existing data before
+upgrading. The legacy SQLite migration is not an encryption conversion tool.
+
+## Search and scaling
+
+Libraries below `POCKET_ANN_THRESHOLD` use a cached exact FAISS inner-product
+index with normalized vectors. Larger libraries use an HNSW graph index.
+Snapshots are saved and reused across restarts, and invalidated by generation
+changes. At most eight library/filter snapshots are retained in memory and 32
+snapshots on disk. Old snapshots are rebuildable from SQLite.
+
+Hybrid retrieval combines semantic and full-text ranks using reciprocal rank
+fusion. `score` remains cosine similarity; hybrid results are ordered by fused
+rank rather than cosine score alone. Similarity is not a confidence probability.
+There is no relevance cutoff, so unrelated queries can return excerpts.
+
+Full-text retrieval is disabled in encrypted libraries to avoid a plaintext
+copy of protected text. Search still uses semantic vectors. Changing embedding
+models requires reindexing existing documents; model identifiers are checked
+before search.
+
+A repeatable synthetic benchmark is included:
+
+```bash
+python tests/benchmark_search.py
+```
+
+On the development machine, 10,000 normalized 384-dimensional vectors produced
+92% recall@10 and approximately 0.48 ms mean graph search time, with a 3.25-second
+index build. This measures vector retrieval, not total query embedding/network
+latency or real-corpus relevance. Hardware and library composition affect results.
+
+Implementation references: [FAISS index documentation](https://github.com/facebookresearch/faiss/wiki/Faiss-indexes),
+[PDF text extraction](https://pypdf.readthedocs.io/en/stable/user/extract-text.html),
+and [SentenceTransformer model API](https://www.sbert.net/docs/package_reference/sentence_transformer/model.html).
+
+## API
+
+Swagger UI is at `/docs`, OpenAPI JSON at `/openapi.json`. `/` checks HTTP health;
+`/ready` checks database availability without loading the model. Default Swagger
+assets use an external CDN and may be unavailable offline.
+
+All library/job/sync operations are scoped to the authenticated owner in account
+mode. Local mode uses the single `local` library.
+
+| Method and path | Purpose |
+| --- | --- |
+| `POST /api/v1/documents` | Multipart upload (`file`), returns document and job ID |
+| `GET /api/v1/documents` | List (`offset`, `limit` up to 100) |
+| `GET /api/v1/documents/{id}` | Metadata, status, warnings, chunk count |
+| `POST /api/v1/documents/{id}/reindex` | Queue reindexing |
+| `GET /api/v1/documents/{id}/original` | Download; byte ranges and ETag supported |
+| `DELETE /api/v1/documents/{id}` | Delete, optional `expected_version` guard |
+| `GET /api/v1/jobs/{id}` | Stage, progress, chunk count, errors |
+| `POST /api/v1/search` | Semantic/hybrid retrieval |
+| `GET /api/v1/auth/mode` | Account-mode availability |
+| `POST /api/v1/auth/register` | Create an account when registration is enabled |
+| `POST /api/v1/auth/login` | Issue a bearer session |
+| `POST /api/v1/auth/logout` | Revoke the current session |
+| `GET /api/v1/sync/changes` | Owner-scoped changes after a sequence cursor |
+| `POST /api/v1/sync/uploads` | Create a resumable upload (`filename`, `total`) |
+| `GET /api/v1/sync/uploads/{id}` | Recover acknowledged byte offset |
+| `PATCH /api/v1/sync/uploads/{id}?offset=N` | Append up to 1 MiB of raw bytes |
+| `POST /api/v1/sync/uploads/{id}/complete` | Finalize and queue indexing |
+| `DELETE /api/v1/sync/uploads/{id}` | Cancel a partial upload |
+
+Replace a document using `POST /documents?document_id=ID&expected_version=N`.
+Use the current version from its metadata. Stable UUIDs can be imported with
+`expected_version=0`. Deleted IDs cannot be resurrected; upload with a new ID.
+
+```bash
+curl -F 'file=@notes.md' http://127.0.0.1:8000/api/v1/documents
 curl -X POST http://127.0.0.1:8000/api/v1/search \
   -H 'Content-Type: application/json' \
-  -d '{"query": "How does photosynthesis work?", "limit": 3}'
+  -d '{"query":"How do plants use sunlight?","limit":3,"hybrid":true,"document_ids":[]}'
 ```
 
-| Request field | Rules |
-| --- | --- |
-| `query` | Required string; 1–2000 characters; whitespace trimmed; blank input rejected |
-| `limit` | Integer from 1 to 50; defaults to 3 |
+Search accepts nonblank queries up to 2,000 characters, limits 1–50 (default 3),
+and up to 100 document IDs. Results include `id`, `document_id`, `filename`,
+`source_title`, `section`, `page`, `line`, `text_excerpt`, and `score`.
 
-Illustrative response; actual IDs and scores depend on the index and model:
-
-```json
-{
-  "query": "How does photosynthesis work?",
-  "results": [
-    {
-      "id": 9,
-      "source_title": "Fundamentals of Physics and Biology",
-      "section": "Photosynthesis and Cellular Respiration",
-      "text_excerpt": "Photosynthesis uses light energy to convert carbon dioxide and water into sugars, releasing oxygen.",
-      "score": 0.72
-    }
-  ]
-}
-```
-
-Results are sorted by descending cosine similarity, with ascending chunk ID as
-the tie breaker. Scores lie between -1 and 1 and represent embedding similarity,
-not probabilities or confidence estimates. There is no minimum relevance
-threshold, so unrelated queries can still return results. The returned excerpt
-is the stored chunk, not an AI-generated summary.
-
-| Status | Meaning |
-| --- | --- |
-| `200` | Search completed; an empty initialized index returns `results: []` |
-| `422` | Request validation failed |
-| `503` | Missing/unusable index, unavailable model, or invalid/incompatible vectors |
-
-Errors include a `detail` field. OpenAPI is available at `/openapi.json`, Swagger
-UI at `/docs`, and ReDoc at `/redoc`.
+Common errors: `400` invalid file/input, `401` unauthenticated, `404` inaccessible
+resource, `409` version/offset conflict, `413` size/quota exceeded, `415` unsupported
+format, `422` validation failure, `429` rate limit, `503` unavailable search model
+or incompatible index. Jobs report parser/model failures in their status.
 
 ## Offline operation
 
-Complete dependency installation and at least one successful ingestion while
-online. Keep the downloaded model cache available to the same user account.
-Before starting the backend or running ingestion offline, set:
+After installing dependencies and successfully indexing once online:
 
 ```bash
 export POCKET_SYLLABUS_OFFLINE=1
-python ingest.py
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-On Windows PowerShell:
+Set the same flag before offline CLI ingestion. Keep the model cache accessible
+to the user running the process. The frontend needs the local API; saved text
+excerpts can be read independently. Synchronization requires connectivity to the
+other server, but local indexing/search continues independently.
 
-```powershell
-$env:POCKET_SYLLABUS_OFFLINE = "1"
+## Accounts and security
+
+For hosted accounts, use a separate library database and enable authentication:
+
+```bash
+export POCKET_AUTH_ENABLED=1
+export POCKET_DB_PATH=/path/to/hosted/syllabus.db
+export POCKET_UPLOAD_DIR=/path/to/hosted/uploads
+export POCKET_INDEX_DIR=/path/to/hosted/indexes
 ```
 
-This flag tells the embedding loader to use cached model files only. Restart the
-backend after changing it because configuration is read when modules are imported.
-The frontend still needs the local backend running. Downloaded `.txt` excerpts
-can be opened independently without either server.
+Users can register/sign in from the frontend. Usernames contain letters, digits,
+underscores, periods, or hyphens; passwords must be 10–128 characters. Passwords
+use salted scrypt hashes. Bearer tokens are stored as hashes, expire after seven
+days, and can be revoked by sign-out. Set `POCKET_REGISTRATION_ENABLED=0` after
+creating permitted accounts if open registration is undesirable.
 
-Default FastAPI `/docs` and `/redoc` pages load browser assets from external
-CDNs; they may not render fully without internet. The local JSON API remains
-usable. Copying only the SQLite database to another machine is insufficient for
-search: that machine also needs the dependencies and the cached embedding model.
+Never expose local unauthenticated mode to the internet. Put hosted services
+behind a TLS reverse proxy with upload limits and shared rate controls when
+scaling beyond one process. The built-in limiter allows 120 requests/minute per
+IP by default and 10/minute for registration/login. Reverse-proxy forwarded-header
+trust must be configured for your actual proxy rather than arbitrary clients.
+
+Usernames/document metadata are local database records; account recovery,
+password reset, email verification, administrator roles, and MFA are not included.
+
+### Optional storage encryption
+
+Generate and securely retain a Fernet key, then set it **before creating a new
+library**:
+
+```bash
+python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+export POCKET_ENCRYPTION_KEY='your-generated-key'
+```
+
+Originals, chunk text, embeddings, resumable server upload segments, and persisted
+FAISS snapshots are encrypted. Database metadata such as titles, sections,
+filenames, hashes, ownership, and timestamps remains readable. Decrypted data
+exists in process memory and transient parser scratch files; full-disk encryption
+is still appropriate for protecting temporary files, swap, and metadata. Interrupted
+worker scratch directories are removed when the worker recovers.
+
+The library rejects a different or absent key on restart. Losing the key loses
+access to encrypted content. Keys are not included in backups. Existing plaintext
+libraries need a new encrypted library and document reuploads; toggling the flag
+cannot retroactively encrypt them. Deletion is logical/storage cleanup, not a
+guarantee of forensic erasure from backups or storage media.
+
+## Synchronization
+
+Run both servers and synchronize from the client machine:
+
+```bash
+export POCKET_REMOTE_TOKEN='token-from-remote-login'
+# Set POCKET_LOCAL_TOKEN too if the local API requires accounts.
+python sync.py --remote-url https://your-server.example/api/v1
+```
+
+Use `--local-url` for a nondefault local backend and `--state-file` for a custom
+checkpoint location. Non-loopback remote URLs require HTTPS; tokens are read
+from environment variables and are never written into checkpoints.
+
+The client exchanges metadata and original files, not embeddings or model
+weights. Destination indexing happens locally in the background. Downloads use
+byte-range resume and SHA-256 verification; uploads resume from server-acknowledged
+offsets. Server upload sessions expire after 24 hours and each owner may have
+three unfinished sessions. Rerun the same command after interruption.
+
+The client compares current content/deletion signatures with its last successful
+checkpoint. One-sided changes propagate; different edits on both sides are
+reported and preserved, with exit code 2. Resolve a conflict by intentionally
+making both originals agree, or keep both as separate document IDs. Version
+guards reject races detected during transfer. Pending replacements on a target
+must finish indexing before another replacement can be accepted.
+
+Synchronization exit codes are `0` for success, `1` for a transfer/configuration
+failure, and `2` for preserved conflicts. Use the same checkpoint file when retrying
+and a separate file for each pair of peers. Redirects are rejected: supply the
+final HTTPS API URL directly.
+
+Checkpoints and partial client downloads contain sensitive metadata/content;
+protect the client directory. The current client replays paginated change metadata
+to construct manifests on each run, while skipping unchanged file transfers.
+It does not yet compact event history or maintain incremental manifest caches.
+
+## Backup and restore
+
+```bash
+python backup.py create /path/to/backups/library.zip
+python backup.py restore /path/to/backups/library.zip /path/to/restored-library
+```
+
+Backups take a consistent SQLite snapshot and copy referenced originals and
+acknowledged partial uploads under a shared file-operation lock. Index snapshots
+and model caches are omitted and can be regenerated. Restore requires an empty
+destination; afterward set `POCKET_DB_PATH` to its `syllabus.db`,
+`POCKET_UPLOAD_DIR` to its `uploads`, and `POCKET_INDEX_DIR` to a new index directory.
+Use the same encryption key when applicable. Restore only trusted backup archives.
 
 ## Configuration
 
-Paths are defined in `app/core/config.py` relative to the project root, so they
-do not depend on the backend process's working directory.
+| Environment variable | Default |
+| --- | --- |
+| `POCKET_DB_PATH` | `database/syllabus.db` |
+| `POCKET_UPLOAD_DIR` | `data/uploads` |
+| `POCKET_INDEX_DIR` | `database/indexes` |
+| `POCKET_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` |
+| `POCKET_SYLLABUS_OFFLINE` | `0` |
+| `POCKET_AUTH_ENABLED` | `0` |
+| `POCKET_REGISTRATION_ENABLED` | `1` |
+| `POCKET_WORKER_ENABLED` | `1` |
+| `POCKET_ENCRYPTION_KEY` | Empty; encryption disabled |
+| `POCKET_MAX_UPLOAD_BYTES` | `52428800` |
+| `POCKET_MAX_LIBRARY_BYTES` | `1073741824` |
+| `POCKET_MAX_DOCUMENTS` | `1000` |
+| `POCKET_BATCH_SIZE` | `32` |
+| `POCKET_EMBEDDING_THREADS` | `2` CPU threads |
+| `POCKET_CHUNK_TOKENS` | `220` |
+| `POCKET_OVERLAP_TOKENS` | `32` |
+| `POCKET_ANN_THRESHOLD` | `5000` |
+| `POCKET_RATE_LIMIT` | `120` requests/minute |
+| `POCKET_API_URL` | Frontend: `http://127.0.0.1:8000/api/v1` |
 
-| Setting | Default | How to change |
-| --- | --- | --- |
-| `DATA_DIR` | `<project>/data` | Edit config, or use ingestion `--data-dir` |
-| `DB_PATH` | `<project>/database/syllabus.db` | Edit config; ingestion also supports `--db-path` |
-| `MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | Edit config and rebuild the index |
-| `OFFLINE_MODE` | Disabled | Set `POCKET_SYLLABUS_OFFLINE=1`, `true`, or `yes` |
-| Frontend `API_URL` | `http://127.0.0.1:8000/api/v1/search` | Edit `app.py` |
+Restart processes after changing settings. Boolean settings accept `1`, `true`,
+or `yes` to enable. Relative path overrides are resolved from the process working
+directory; default paths are project-relative.
 
-If you change embedding models, always rebuild the index. Matching vector sizes
-alone do not guarantee embeddings from different models are compatible.
-
-## Tests
-
-Install development dependencies if they are not already present:
+## Tests and verification
 
 ```bash
 python -m pip install -r requirements-dev.txt
-# Alternatively: uv pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v
 ```
 
-The current suite contains 26 tests covering:
+Normal tests use deterministic embeddings and temporary databases. They exercise
+format extraction, token boundaries, citations, batch staging, replacement failures,
+cache persistence/invalidation, HNSW, encrypted storage, migration, account
+isolation, HTTP uploads/downloads, resumable transfers, synchronization conflicts,
+backup/restore, and Streamlit notes/search/download controls.
 
-- Markdown headings, citations, and long-paragraph boundaries.
-- Query normalization and invalid request rejection.
-- Float32 vector persistence and nested source paths.
-- Reindexing without duplicates and preservation on embedding failure.
-- Cosine ranking, result limits, ties, and zero/corrupt vectors.
-- API health, response serialization, validation, and service errors.
-- Streamlit search, citations, download controls, retained results, and errors.
+For the cached real model:
 
-Tests use temporary databases, deterministic embeddings, in-process API requests,
-and mocked frontend HTTP responses. They do not contact external services,
-download model weights, or modify the project database. Model quality and the
-contents of actual browser downloads are outside the automated suite's scope.
-See [tests/README.md](tests/README.md) for additional details.
+```bash
+POCKET_REAL_MODEL_TESTS=1 HF_HUB_OFFLINE=1 python -m unittest discover -s tests -v
+```
+
+The normal suite skips that integration check so model downloads are never required.
+The verified suite contains **55 tests**: 27 unit tests, 21 integration tests,
+and 7 UI tests. A normal run passes 54 and skips the cached-model check; enabling
+`POCKET_REAL_MODEL_TESTS=1` runs all 55. The latest full verification passed all
+55, including long input split with the actual model tokenizer.
+
+Live verification also exercised Markdown, PDF, and DOCX uploads, background
+indexing, filtered searches, PDF page citations, byte-range original downloads,
+and versioned replacements. A browser-downloaded excerpt was checked for both
+its citation and text. These manual checks supplement the automated suite.
+
+See [tests/README.md](tests/README.md) for focused commands and
+[the verification record](tests/verification.md) for measured results and coverage
+boundaries. The benchmark is separate from unit tests.
+
+## Deployment
+
+```bash
+docker compose -f deployment/compose.yaml up --build
+```
+
+The containers run as an unprivileged user, bind published ports to localhost,
+use persistent library/model volumes, enable account mode, and check readiness.
+A TLS reverse proxy is required for external hosted access. The frontend container
+uses the internal API address. To preserve offline startup, populate the model
+cache while online before setting offline mode.
+
+Container configuration is provided, but Docker was unavailable in the development
+environment, so container build/start was not executed there. Dependencies currently
+use version ranges/unpinned packages; pin a tested deployment environment before
+reproducing it elsewhere.
 
 ## Troubleshooting
 
 | Symptom | Action |
 | --- | --- |
-| `ensurepip` unavailable during environment creation | Install the matching Python venv package, or create the environment with uv |
-| `ModuleNotFoundError` | Activate `.venv` and install the appropriate requirements file |
-| No Markdown files or no indexable paragraphs | Check the input path, `.md` extension, and that files contain text beyond headings |
-| Index missing/unavailable or search returns `503` | Run `python ingest.py` and check the configured database path |
-| Model unavailable in offline mode | Temporarily disable offline mode and run ingestion online to populate the cache |
-| Invalid or incompatible vectors | Rebuild the database using the backend's configured embedding model |
-| Frontend cannot reach the API | Start Uvicorn on port 8000 and check `API_URL` in `app.py` |
-| Port already in use | Stop the conflicting process, or choose another port and update the frontend URL |
-| Slow first request | Model loading happens on the first nonempty search in each backend process |
-| Unexpectedly unrelated results | Add better source materials or refine the query; search has no relevance cutoff |
-
-The frontend uses a 120-second request timeout. On a slow first download or model
-load, the client may time out; complete ingestion first and retry after the backend
-is ready. Updating Markdown files alone does not update the index.
-
-## Limitations and development
-
-This implementation targets small, local collections. Every search reads all
-stored chunks and compares their vectors in Python; there is no approximate
-nearest-neighbor index or database-level vector search. Ingestion also holds
-all chunks and embeddings in memory. Large collections will need batching,
-index caching, or a dedicated vector index.
-
-The 180-word chunk limit is a word-based heuristic, not a model token budget;
-some text can exceed the embedding model's input window. Chunking is basic and
-does not implement a full Markdown parser, special code-block handling, or overlap.
-
-There is no authentication, user account system, rate limiting, deployment
-configuration, or cross-device synchronization. The commands above bind the
-backend and frontend to localhost for local use. The application stores local
-materials and embeddings on disk without application-level encryption.
-
-For backend development:
-
-```bash
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
-```
-
-Add transport handlers under `app/api/v1/endpoints/`, request/response models
-under `app/schemas/`, and business logic under `app/services/`. Register new
-routers in `app/api/v1/__init__.py`. Keep tests independent of model downloads
-and use temporary storage for database tests.
-
-Dependencies are currently not pinned to a reproducible lockfile. Record tested
-versions or introduce a lockfile when preparing a repeatable deployment.
+| Upload remains queued | Ensure the embedded or standalone indexing worker is running |
+| Indexing fails on a scanned PDF | Run OCR externally, then upload a searchable PDF |
+| Model unavailable offline | Cache the configured model online and retry/reindex |
+| Old excerpts after replacement failure | Fix the file/model problem and reindex; the previous index is preserved |
+| Version conflict | Refresh document metadata and review concurrent changes |
+| Sync offset conflict | Query the upload session and resume at its acknowledged offset |
+| Encryption key mismatch | Restore the original key or use the correct library paths |
+| API connection failure | Check port 8000 and `POCKET_API_URL` |
+| Request limit exceeded | Wait for the window to reset or configure appropriate deployment limits |
+| Index model mismatch | Reindex all affected documents with the configured model |
 
 ## Licensing
 
-No software license file has been added to this repository. Choose and add an
-appropriate license before distributing the project as licensed open-source
-software. The sample syllabus is original mock educational text for testing;
-it does not claim to reproduce a textbook or accredited curriculum.
-
-When adding OER materials, retain their attribution and license notices and
-verify that their terms permit your intended use. PocketSyllabus does not enforce
-or validate content licensing.
+No software license has been selected. Add one before distributing the repository
+as licensed open-source software. Preserve attribution, source links, and licenses
+for imported OER materials; PocketSyllabus does not validate their permissions.

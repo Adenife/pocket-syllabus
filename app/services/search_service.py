@@ -1,77 +1,48 @@
-"""Local embedding generation and SQLite cosine-similarity retrieval."""
-import sqlite3
-from functools import lru_cache
-from pathlib import Path
-from threading import Lock
-
+"""Cached semantic and keyword retrieval, with document ownership enforced."""
 import numpy as np
-
-from app.core.config import DB_PATH, MODEL_NAME, OFFLINE_MODE
 from app.schemas.resource import SearchResultItem
-
-
-class SearchServiceError(RuntimeError):
-    """An actionable indexing or model availability error."""
-
-
-_model_lock = Lock()
-
-
-@lru_cache(maxsize=1)
-def get_embedding_model():
-    # Lazy loading lets health checks work before the model is installed/cached.
-    from sentence_transformers import SentenceTransformer
-    try:
-        return SentenceTransformer(MODEL_NAME, local_files_only=OFFLINE_MODE)
-    except Exception as exc:
-        raise SearchServiceError(
-            "Embedding model unavailable. Run python ingest.py with internet access "
-            "once to cache the model before enabling offline mode."
-        ) from exc
-
-
-def encode_texts(texts: list[str]) -> np.ndarray:
-    with _model_lock:
-        model = get_embedding_model()
-        return np.asarray(model.encode(
-            texts, normalize_embeddings=True, convert_to_numpy=True,
-            show_progress_bar=False,
-        ), dtype=np.float32)
-
+from app.services.embedding_service import SearchServiceError, encode_texts, get_embedding_model
+from app.storage.chunk_repository import ChunkRepository
+from app.storage.vector_index import VectorIndex
 
 class SearchService:
-    def __init__(self, db_path: Path = DB_PATH):
-        self.db_path = Path(db_path)
+    def __init__(self, db, embedder):
+        self.db, self.embedder = db, embedder
+        self.index = VectorIndex(db)
+        self.chunks = ChunkRepository(db)
 
-    def search(self, query: str, limit: int = 3) -> list[SearchResultItem]:
-        if not self.db_path.is_file():
-            raise SearchServiceError("Index missing. Run python ingest.py first.")
-        try:
-            # Read-only connections never create an empty database by accident.
-            with sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
-                rows = conn.execute(
-                    "SELECT id, source_title, section, text, embedding FROM chunks"
-                ).fetchall()
-        except sqlite3.Error as exc:
-            raise SearchServiceError("Index unavailable. Run python ingest.py to rebuild it.") from exc
-        if not rows:
+    def search(self, query, limit=3, owner='local', document_ids=(), hybrid=True):
+        index = self.index.snapshot(owner, document_ids)
+        if index is None:
             return []
-        query_vector = encode_texts([query])[0]
-        query_norm = float(np.linalg.norm(query_vector))
-        if not np.isfinite(query_norm) or query_norm == 0:
-            raise SearchServiceError("Model returned an invalid query embedding.")
-        ranked = []
-        for chunk_id, title, section, text, blob in rows:
-            try:
-                vector = np.frombuffer(blob, dtype=np.float32)
-            except (ValueError, TypeError) as exc:
-                raise SearchServiceError("Invalid index vector. Run python ingest.py again.") from exc
-            if vector.shape != query_vector.shape or not np.isfinite(vector).all():
-                raise SearchServiceError("Index embeddings are incompatible. Run python ingest.py again.")
-            norm = float(np.linalg.norm(vector))
-            score = float(np.dot(query_vector, vector) / (query_norm * norm)) if norm else 0.0
-            ranked.append(SearchResultItem(
-                id=chunk_id, source_title=title, section=section,
-                text_excerpt=text, score=float(np.clip(score, -1.0, 1.0)),
-            ))
-        return sorted(ranked, key=lambda item: (-item.score, item.id))[:limit]
+        vector = np.asarray(self.embedder.encode([query]), dtype=np.float32)
+        if vector.shape != (1, index.d) or not np.isfinite(vector).all() or np.linalg.norm(vector) == 0:
+            raise SearchServiceError('Invalid or incompatible query vector. Reindex with the configured model.')
+        vector /= np.linalg.norm(vector)
+        count = min(index.ntotal, max(limit * 8, 64))
+        scores, ids = index.search(vector, count)
+        semantic = sorted([(int(i), float(np.clip(s, -1, 1))) for i, s in zip(ids[0], scores[0]) if i != -1], key=lambda pair: (-pair[1], pair[0]))
+        lexical = self.chunks.lexical(query, owner, document_ids, count) if hybrid else []
+        score_map = dict(semantic)
+        if lexical:
+            ranks = {}
+            for ranked in [[i for i, _ in semantic], lexical]:
+                for rank, identifier in enumerate(ranked, 1):
+                    ranks[identifier] = ranks.get(identifier, 0) + 1 / (60 + rank)
+            winners = sorted(ranks, key=lambda i: (-ranks[i], i))[:limit]
+        else:
+            winners = [i for i, _ in semantic[:limit]]
+        rows = self.chunks.fetch(winners, owner)
+        results = []
+        for identifier in winners:
+            if identifier not in rows:
+                continue  # A concurrent deletion/reindex can remove a snapshot result.
+            row = rows[identifier]
+            score = score_map.get(identifier)
+            if score is None:
+                stored = np.frombuffer(self.db.codec.decode(row['embedding']), dtype=np.float32)
+                score = float(np.clip(np.dot(stored, vector[0]) / np.linalg.norm(stored), -1, 1))
+            results.append(SearchResultItem(id=identifier, document_id=row['document_id'],
+                source_title=row['source_title'], section=row['section'], text_excerpt=row['text'], score=score,
+                page=row['page'], line=row['line'], filename=row['filename']))
+        return results
