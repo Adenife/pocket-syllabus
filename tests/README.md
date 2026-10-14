@@ -38,6 +38,15 @@ Streamlit and FastAPI tests need a runtime that permits worker threads. In
 restricted execution environments, a stalled in-process HTTP test may require
 running the suite outside that sandbox.
 
+## GitHub Actions
+
+[`.github/workflows/tests.yml`](../.github/workflows/tests.yml) runs on every push,
+pull request, and manual run from the repository Actions tab. It uses Python 3.12
+on Ubuntu, installs CPU-only PyTorch and development dependencies, checks package
+compatibility, and runs the complete standard suite. Model downloads are disabled;
+the optional real-model test is skipped (88 passing tests and one skip expected).
+Pip downloads are cached between runs. No repository secrets are required.
+
 ## Coverage and layout
 
 | Directory/file | Coverage |
