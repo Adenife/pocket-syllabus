@@ -9,11 +9,11 @@ router = APIRouter(prefix='/documents', tags=['documents'])
 @router.post('', status_code=202)
 async def upload(request: Request, file: UploadFile = File(...),
                  document_id: str | None = None, expected_version: int | None = Query(None, ge=0),
-                 owner: str = Depends(current_owner)):
+                 expected_metadata_version:int|None=Query(None,ge=1), owner: str = Depends(current_owner)):
     context = get_context(request)
     try:
         data = await file.read(context.settings.max_upload_bytes + 1)
-        return await run_in_threadpool(context.documents.upload, owner, file.filename, data, document_id, expected_version)
+        return await run_in_threadpool(context.documents.upload, owner, file.filename, data, document_id, expected_version, expected_metadata_version=expected_metadata_version)
     finally:
         await file.close()
 
@@ -35,8 +35,9 @@ def reindex(identifier: str, request: Request, owner: str = Depends(current_owne
     return {'job_id': get_context(request).documents.reindex(identifier, owner)}
 
 @router.get('/{identifier}/original')
-def original(identifier: str, request: Request, owner: str = Depends(current_owner)):
-    doc, data = get_context(request).documents.original(identifier, owner)
+def original(identifier: str, request: Request, include_trash:bool=False,track_open:bool=True,owner: str = Depends(current_owner)):
+    doc, data = get_context(request).documents.original(identifier, owner,include_trash)
+    if not include_trash and track_open: get_context(request).library.opened(identifier,owner)
     headers = {'Content-Disposition': "attachment; filename*=UTF-8''" + quote(doc['filename']),
                'Accept-Ranges': 'bytes', 'ETag': '"' + doc['content_hash'] + '"'}
     range_value = request.headers.get('range')

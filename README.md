@@ -34,7 +34,10 @@ enable isolated user accounts for a hosted deployment.
 
 - Upload Markdown, UTF-8 text, searchable PDF, and DOCX files.
 - Write and edit notes directly in the Library tab.
-- List, replace, reindex, download, and delete documents.
+- Organize documents by subjects, tags, collections, material type, and favorites.
+- Filter, sort, preview, replace, reindex, and download documents.
+- Save cited bookmarks with annotations; recover documents from Trash.
+- Export/import collection archives and review related materials or possible editions.
 - Background indexing with persistent jobs and restart recovery.
 - Model-token-aware chunking, overlap, heading paths, and page/line citations.
 - Bounded embedding batches and incremental per-document replacement.
@@ -85,7 +88,7 @@ pocket-syllabus/
 ├── app/
 │   ├── main.py                    # App factory, lifespan, health/readiness
 │   ├── core/                      # Settings, security, middleware, logging
-│   ├── api/v1/endpoints/           # Documents, jobs, search, accounts, sync
+│   ├── api/v1/endpoints/           # Library, documents, jobs, search, accounts, sync
 │   ├── schemas/                   # API validation and serialization
 │   ├── ingestion/
 │   │   ├── parsers/                # Markdown, TXT, PDF, DOCX
@@ -94,12 +97,13 @@ pocket-syllabus/
 │   ├── services/                  # Documents, ingestion, embeddings, search, sync
 │   ├── storage/                   # Database, repositories, FAISS snapshots
 │   └── workers/indexing_worker.py
-├── frontend/                      # Client, library, search, settings
+├── frontend/                      # Client, library, organization, reading tools, search, settings
 ├── data/
 │   ├── samples/sample_syllabus.md
 │   └── uploads/                   # Private runtime files, ignored by Git
 ├── database/
 │   ├── migrations/001_library.sql
+│   ├── migrations/002_organization.sql
 │   ├── syllabus.db                # Runtime database, ignored by Git
 │   └── indexes/                   # Derived snapshots, ignored by Git
 ├── deployment/                    # Dockerfile and Compose configuration
@@ -163,7 +167,7 @@ streamlit run app.py --server.address 127.0.0.1 --browser.gatherUsageStats false
 
 Open [PocketSyllabus](http://127.0.0.1:8501). In **Library**, upload textbooks or
 notes, or write a note. Status progresses from `queued` to `indexing` to `ready`;
-the view refreshes every five seconds. Failed extraction or model loading is
+the view refreshes every ten seconds. Failed extraction or model loading is
 shown with an error. After indexing, search in the **Search** tab.
 
 Select documents to narrow a search, or leave the selection empty for the whole
@@ -176,10 +180,71 @@ Text/Markdown documents have an **Edit note** action. Any document can be
 replaced by an updated file. Concurrent replacements are rejected with a version
 conflict. A previous successful index stays searchable if a replacement fails.
 
-Deletion requires selecting the confirmation checkbox. It removes the current
-original, chunks, and saved vector snapshots, and cancels pending indexing.
-Minimal deletion/version metadata remains for synchronization. Stop each server
-with `Ctrl+C`.
+Move documents to **Trash** to hide them from browsing and search and cancel pending indexing.
+Restore them from the Trash tab to queue indexing again. Permanent deletion requires
+a confirmation checkbox and removes originals, chunks, bookmarks, and memberships;
+a minimal synchronization tombstone remains. Trashed originals still count toward
+storage quotas and are included in backups. Stop each server with `Ctrl+C`.
+
+## Organize and read your library
+
+Create **subjects** for fields such as Physics, **tags** for flexible labels such
+as Exam revision, and **collections** for courses or reading lists. A document
+can belong to several of each. Category names are unique ignoring case within
+an owner and category kind. Rename or remove categories from the organization
+controls; removing a category keeps its documents.
+
+Edit each document's display title, description, author, publication year,
+edition, material type, favorite flag, and category memberships. Material types
+include textbook, lecture notes, syllabus, assignment, revision notes, other,
+and unspecified. Metadata survives file replacement and reindexing. Metadata
+has its own concurrency version, separate from the original-file version.
+An explicit `title: null` API update resets the display title to the extracted title.
+
+Filter by category, material/file type, indexing status, or favorites. The library
+text filter matches title, filename, and author. Multiple selected categories of
+the same kind match any selected value; filters across kinds must all match.
+Sort ascending or descending by title, added/updated date, size, status, author,
+publication year, or last opened. Browsing is paginated, and semantic search also
+supports subject, tag, and collection scopes. Bulk actions can assign/remove
+categories, mark favorites, reindex, move to Trash, or restore up to 100 documents.
+
+Preview extracted chunks with available page/line citations, open originals,
+and discover semantically related documents. Preview is extracted text rather
+than a graphical PDF viewer. Opening records a local reading timestamp. Save
+search results as bookmarks, add annotations in **Bookmarks**, and download them
+as text. Bookmarks retain their original excerpt and citation after reindexing.
+**Insights** shows library statistics and possible editions grouped by normalized
+title. These groups are review suggestions; they do not merge files automatically.
+Local keyword-based classification suggestions require your review before applying.
+
+Export a collection or selected documents as a ZIP containing originals, metadata,
+and bookmarks. Import validates paths, hashes, supported file payloads, and quotas
+before uploads, then queues local indexing. Archives contain at most 100 documents
+and 200 MiB of expanded original content; ordinary per-file upload limits also apply.
+Empty collections are supported. Identical originals are reused and imported
+organization is merged. Embeddings are rebuilt rather than exported. A disk failure
+can leave successfully imported documents in place; retrying deduplicates them.
+Archives contain readable originals and annotations, even with storage encryption
+enabled, so keep them private.
+
+Library APIs live under `/api/v1/library`:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /documents` | Paginated filters and sorting; returns items, total, offset, limit |
+| `GET /catalog`, `POST /categories`, `PATCH/DELETE /categories/{id}` | Manage subjects, tags, collections |
+| `PATCH /documents/{id}` | Metadata update with required expected_metadata_version |
+| `POST /bulk` | Apply an action to selected documents |
+| `POST /documents/{id}/trash`, `/restore`, `/opened` | Recovery and reading history |
+| `GET /documents/{id}/preview`, `/suggestions`, `/related` | Reading and discovery |
+| `GET/POST /bookmarks`, `PATCH/DELETE /bookmarks/{id}` | Saved excerpts and annotations |
+| `GET /statistics`, `/duplicates` | Library overview and edition review |
+| `POST /export`, `/import` | Portable collection archives |
+
+The existing `/api/v1/documents` list contract is preserved. Its DELETE endpoint
+permanently purges a document; use the library trash endpoint for recoverable removal.
+See `/docs` for complete request schemas.
 
 ## Everyday workflow
 
@@ -444,10 +509,17 @@ failure, and `2` for preserved conflicts. Use the same checkpoint file when retr
 and a separate file for each pair of peers. Redirects are rejected: supply the
 final HTTPS API URL directly.
 
-Checkpoints and partial client downloads contain sensitive metadata/content;
-protect the client directory. The current client replays paginated change metadata
-to construct manifests on each run, while skipping unchanged file transfers.
-It does not yet compact event history or maintain incremental manifest caches.
+Synchronization also transfers custom metadata, favorites, category memberships,
+bookmarks/annotations, empty collections and category descriptions, and recoverable
+Trash state. Metadata-only changes skip original-file transfers. Concurrent
+organization edits are preserved as conflicts, including unsafe category removal.
+Reading timestamps remain local.
+
+Checkpoints cache manifests and consume changes incrementally after their saved
+cursors. Peer library/account identity and rolled-back event sequences are checked.
+Use a new state file when upgrading an older checkpoint to format 2. Checkpoints
+and partial downloads contain sensitive metadata, excerpts, and content; protect
+the client directory. Event history is not compacted.
 
 ## Backup and restore
 
@@ -511,12 +583,13 @@ POCKET_REAL_MODEL_TESTS=1 HF_HUB_OFFLINE=1 python -m unittest discover -s tests 
 ```
 
 The normal suite skips that integration check so model downloads are never required.
-The verified suite contains **55 tests**: 27 unit tests, 21 integration tests,
-and 7 UI tests. A normal run passes 54 and skips the cached-model check; enabling
-`POCKET_REAL_MODEL_TESTS=1` runs all 55. The latest full verification passed all
-55, including long input split with the actual model tokenizer.
+The verified suite contains **89 tests**: 31 unit tests, 47 integration tests,
+and 11 UI tests. A normal run passes 88 and skips the cached-model check; enabling
+`POCKET_REAL_MODEL_TESTS=1` runs all 89. The latest full verification passed all
+89, including library organization, archives, bookmark persistence, trash recovery,
+metadata/category synchronization, worker cancellation races, and long input split with the actual model tokenizer.
 
-Live verification also exercised Markdown, PDF, and DOCX uploads, background
+Earlier live verification also exercised Markdown, PDF, and DOCX uploads, background
 indexing, filtered searches, PDF page citations, byte-range original downloads,
 and versioned replacements. A browser-downloaded excerpt was checked for both
 its citation and text. These manual checks supplement the automated suite.

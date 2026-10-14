@@ -28,7 +28,7 @@ in-process API requests. A model download is not needed for the normal suite.
 python -m unittest discover -s tests -v
 ```
 
-There are **55 tests**. The standard run passes 54 and skips one cached-model
+There are **89 tests**. The standard run passes 88 and skips one cached-model
 integration test. Tests create temporary databases, uploads, vector indexes,
 backups, and sync checkpoints; they do not modify the user's library.
 
@@ -50,11 +50,14 @@ running the suite outside that sandbox.
 | `integration/test_transfer.py` | Actual sync HTTP client against two isolated APIs: resumed uploads/downloads, replacement, and deletion |
 | `integration/test_real_model.py` | Opt-in MiniLM semantic retrieval and actual token budgets on long input |
 | `ui/test_frontend.py` | Library controls, note creation/editing, deletion confirmation, sign-in, search, citations, excerpt controls, retained results, connection errors |
+| `unit/test_library_storage.py` | Organization migration, encrypted bookmarks, trash backups, cancelled-worker recovery |
+| `integration/test_library.py` | Filters/sorting, owner isolation, metadata conflicts, categories, bulk operations, previews, related materials, bookmarks, trash, archive validation/import/export |
+| `integration/test_library_sync.py` | Metadata-only transfers, bookmarks, empty collections, renames/removal conflicts, trash replacement/restore/purge, incremental checkpoints |
 | `helpers.py` | Isolated contexts and deterministic tokenizer/embedding doubles |
 | `fixtures/` | Small reusable sample study material |
 | `benchmark_search.py` | Separate synthetic FAISS recall/latency benchmark |
 
-The suite has 27 unit tests, 21 integration tests, and 7 UI tests.
+The suite has 31 unit tests, 47 integration tests, and 11 UI tests.
 
 ## Run a focused group
 
@@ -65,6 +68,7 @@ python -m unittest discover -s tests -p 'test_api.py' -v
 python -m unittest discover -s tests -p 'test_parsers.py' -v
 python -m unittest discover -s tests -p 'test_frontend.py' -v
 python -m unittest discover -s tests -p 'test_sync.py' -v
+python -m unittest discover -s tests -p 'test_library*.py' -v
 ```
 
 Using the `tests` discovery root keeps shared helpers importable.
@@ -108,8 +112,8 @@ real educational-content relevance, and timings vary by machine.
 
 ## Verification boundaries
 
-All 55 tests passed in the latest full verification. See
-[verification.md](verification.md) for live-server and browser checks, including
+All 89 tests passed in the latest full verification. See
+[verification.md](verification.md) for the latest automated library checks and earlier live-server/browser checks, including
 an actual excerpt download whose text and citation were inspected.
 
 Docker configuration was checked structurally, but Docker was unavailable for

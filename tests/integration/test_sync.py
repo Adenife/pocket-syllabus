@@ -9,21 +9,51 @@ from helpers import context, upload_ready
 class LocalPeer:
     def __init__(self,ctx,url):
         self.ctx,self.url=ctx,url
+    def catalog(self):
+        return [item for items in self.ctx.library.catalog('local').values() for item in items]
+    def create_category(self,item):
+        from app.schemas.library import CategoryCreate
+        result=self.ctx.library.create_category('local',CategoryCreate(kind=item['kind'],name=item['name'],description=item.get('description','')))
+        return {**result,'document_count':0,'membership_count':0}
+    def update_category(self,target,source):
+        from app.schemas.library import CategoryEdit
+        result=self.ctx.library.change_category(target['id'],'local',CategoryEdit(name=source['name'],description=source.get('description',''),expected_name=target['name'],expected_description=target.get('description','')))
+        return {**result,'document_count':target.get('document_count',0),'membership_count':target.get('membership_count',0)}
+    def delete_category(self,item):
+        self.ctx.library.change_category(item['id'],'local',expected_name=item['name'],expected_description=item.get('description',''),require_empty=True)
     def manifest(self):
         with self.ctx.db.connect() as conn:
             ids=[row[0] for row in conn.execute('SELECT id FROM documents')]
-        return {identifier:self.ctx.documents.require(identifier,'local',True) for identifier in ids}
+        docs={identifier:self.ctx.documents.require(identifier,'local',True) for identifier in ids}
+        for doc in docs.values(): doc['organization']=self.ctx.library.portable(doc)
+        return docs
     def download(self,doc,folder):
         folder.mkdir(parents=True,exist_ok=True)
         path=folder/(doc['id']+'.part')
-        path.write_bytes(self.ctx.documents.original(doc['id'],'local')[1])
+        path.write_bytes(self.ctx.documents.original(doc['id'],'local',include_deleted=True)[1])
         return path
     def upload(self,doc,path,destination,transfers,save):
-        result=self.ctx.documents.upload('local',doc['filename'],path.read_bytes(),doc['id'],destination['version'] if destination else 0)
+        result=self.ctx.documents.upload('local',doc['filename'],path.read_bytes(),doc['id'],destination['version'] if destination else 0,allow_trashed=bool(destination and destination['deleted_at']))
+        if 'organization' in doc:
+            self.ctx.library.apply_portable(doc['id'],'local',doc['organization'],result['document']['metadata_version'])
         self.ctx.worker.run_once()
         return result['document']
-    def delete(self,doc):
-        self.ctx.documents.delete(doc['id'],'local',doc['version'])
+    def organization(self,source,destination):
+        self.ctx.library.apply_portable(source['id'],'local',source['organization'],destination['metadata_version'])
+    def delete(self,doc,purge=False):
+        if purge: self.ctx.documents.delete(doc['id'],'local',doc['version'])
+        else: self.ctx.documents.trash(doc['id'],'local',doc['version'])
+    def tombstone(self,doc):
+        self.ctx.documents.tombstone(doc['id'],'local')
+    def restore(self,doc):
+        self.ctx.documents.restore(doc['id'],'local',doc['version'])
+        self.ctx.worker.run_once()
+        result=self.ctx.documents.require(doc['id'],'local')
+        result['organization']=self.ctx.library.portable(result)
+        return result
+    def wait_indexing(self,identifier):
+        self.ctx.worker.run_once()
+        return self.ctx.documents.require(identifier,'local')
 
 class SyncTests(unittest.TestCase):
     def setUp(self):

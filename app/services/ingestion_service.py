@@ -79,4 +79,4 @@ class IngestionService:
             with self.db.connect() as conn:
                 conn.execute('DELETE FROM staged_chunks WHERE job_id=?', (job_id,))
                 conn.execute("UPDATE jobs SET status='failed', stage='failed', error=?, updated_at=? WHERE id=? AND status='running'", (message[:1000], time.time(), job_id))
-                conn.execute("UPDATE documents SET status='failed', error=?, warnings=?, updated_at=? WHERE id=? AND deleted_at IS NULL", (message[:1000], json.dumps(warnings[:100]), time.time(), identifier))
+                conn.execute("UPDATE documents SET status='failed', error=?, warnings=?, updated_at=? WHERE id=? AND deleted_at IS NULL AND version=? AND EXISTS (SELECT 1 FROM jobs WHERE id=? AND status='failed')", (message[:1000], json.dumps(warnings[:100]), time.time(), identifier,job['version'],job_id))

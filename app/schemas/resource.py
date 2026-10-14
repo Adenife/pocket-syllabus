@@ -5,6 +5,9 @@ class SearchQuery(BaseModel):
     limit: int = Field(default=3, ge=1, le=50)
     document_ids: list[str] = Field(default_factory=list, max_length=100)
     hybrid: bool = True
+    subject_ids: list[str] = Field(default_factory=list,max_length=30)
+    tag_ids: list[str] = Field(default_factory=list,max_length=50)
+    collection_ids: list[str] = Field(default_factory=list,max_length=30)
 
     @field_validator('query')
     @classmethod

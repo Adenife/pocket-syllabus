@@ -8,7 +8,7 @@ class ChunkRepository:
         if not ids:
             return {}
         with self.db.connect() as conn:
-            rows = conn.execute('''SELECT c.*, d.filename FROM chunks c JOIN documents d ON d.id=c.document_id
+            rows = conn.execute('''SELECT c.*, d.filename,COALESCE(d.display_title,d.title) AS display_source_title FROM chunks c JOIN documents d ON d.id=c.document_id
                 WHERE c.owner_id=? AND d.deleted_at IS NULL AND c.id IN (''' + ','.join('?' for _ in ids) + ')', [owner, *ids]).fetchall()
         result = {}
         for row in rows:
@@ -26,7 +26,7 @@ class ChunkRepository:
         expression = ' OR '.join('"' + term.replace('"', '""') + '"' for term in terms)
         with self.db.connect() as conn:
             sql = '''SELECT f.rowid FROM chunks_fts f JOIN chunks c ON c.id=f.rowid
-                WHERE chunks_fts MATCH ? AND c.owner_id=?'''
+                WHERE chunks_fts MATCH ? AND c.owner_id=? AND c.document_id IN (SELECT id FROM documents WHERE deleted_at IS NULL)'''
             args = [expression, owner]
             if document_ids:
                 sql += ' AND c.document_id IN (' + ','.join('?' for _ in document_ids) + ')'

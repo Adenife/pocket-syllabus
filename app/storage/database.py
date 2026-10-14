@@ -51,6 +51,19 @@ class Database:
             conn.execute("INSERT OR IGNORE INTO meta VALUES ('library_id', ?)", (str(uuid.uuid4()),))
             if conn.execute("SELECT 1 FROM sqlite_master WHERE name='legacy_chunks'").fetchone():
                 self._migrate_legacy(conn)
+            columns={r['name'] for r in conn.execute('PRAGMA table_info(documents)')}
+            additions={
+                'display_title':'TEXT', 'description':"TEXT NOT NULL DEFAULT ''",
+                'author':"TEXT NOT NULL DEFAULT ''",'publication_year':'INTEGER',
+                'edition':"TEXT NOT NULL DEFAULT ''",'material_type':"TEXT NOT NULL DEFAULT 'unspecified'",
+                'favorite':'INTEGER NOT NULL DEFAULT 0','last_opened':'REAL',
+                'metadata_version':'INTEGER NOT NULL DEFAULT 1','metadata_updated_at':'REAL NOT NULL DEFAULT 0',
+                'purged_at':'REAL'}
+            for name,definition in additions.items():
+                if name not in columns:
+                    conn.execute(f'ALTER TABLE documents ADD COLUMN {name} {definition}')
+            conn.executescript((BASE_DIR/'database/migrations/002_organization.sql').read_text())
+            conn.execute("UPDATE documents SET purged_at=deleted_at WHERE deleted_at IS NOT NULL AND storage_name='' AND content_hash=''")
         self.path.chmod(0o600)
 
     def _migrate_legacy(self, conn):

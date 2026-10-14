@@ -5,6 +5,13 @@ from app.schemas.document import UploadSession
 
 router = APIRouter(prefix='/sync', tags=['synchronization'])
 
+@router.get('/identity')
+def identity(request:Request,owner:str=Depends(current_owner)):
+    with get_context(request).db.connect() as conn:
+        library_id=conn.execute("SELECT value FROM meta WHERE key='library_id'").fetchone()[0]
+        sequence=conn.execute('SELECT COALESCE(MAX(seq),0) FROM events WHERE owner_id=?',(owner,)).fetchone()[0]
+    return {'library_id':library_id,'owner_id':owner,'latest_sequence':sequence}
+
 @router.get('/changes')
 def changes(request: Request, after: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=100), owner: str = Depends(current_owner)):
     return get_context(request).sync.changes(owner, after, limit)
@@ -29,10 +36,15 @@ async def append(identifier: str, request: Request, offset: int = Query(ge=0), o
 
 @router.post('/uploads/{identifier}/complete', status_code=202)
 def complete(identifier: str, request: Request, document_id: str | None = None,
-             expected_version: int | None = Query(None, ge=0), owner: str = Depends(current_owner)):
-    return get_context(request).sync.complete(identifier, owner, document_id, expected_version)
+             expected_version: int | None = Query(None, ge=0), expected_metadata_version:int|None=Query(None,ge=1),preserve_trash:bool=False, owner: str = Depends(current_owner)):
+    return get_context(request).sync.complete(identifier, owner, document_id, expected_version, expected_metadata_version,preserve_trash)
 
 @router.delete('/uploads/{identifier}', status_code=204)
 def cancel(identifier: str, request: Request, owner: str = Depends(current_owner)):
     get_context(request).sync.cancel(identifier, owner)
+    return Response(status_code=204)
+
+@router.post('/tombstones/{identifier}',status_code=204)
+def tombstone(identifier:str,request:Request,owner:str=Depends(current_owner)):
+    get_context(request).documents.tombstone(identifier,owner)
     return Response(status_code=204)

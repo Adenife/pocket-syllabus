@@ -22,7 +22,7 @@ def backup(settings, output):
         with db.connect() as source, sqlite3.connect(snapshot) as target:
             source.backup(target)
         with sqlite3.connect(snapshot) as conn:
-            files=[row[0] for row in conn.execute("SELECT storage_name FROM documents WHERE deleted_at IS NULL AND storage_name!=''")]
+            files=[row[0] for row in conn.execute("SELECT storage_name FROM documents WHERE storage_name!=''")]
             files += [row[0]+'.part' for row in conn.execute('SELECT id FROM uploads WHERE offset>0')]
         try:
             with zipfile.ZipFile(output,'w',compression=zipfile.ZIP_DEFLATED) as archive:

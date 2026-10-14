@@ -29,7 +29,7 @@ class VectorIndex:
                 return self.cache[key]
             tag = hashlib.sha256(repr(key).encode()).hexdigest()
             path = self.db.settings.index_dir / (tag + '.index')
-            where = 'owner_id=?'
+            where = 'owner_id=? AND document_id IN (SELECT id FROM documents WHERE deleted_at IS NULL)'
             args = [owner]
             if document_ids:
                 where += ' AND document_id IN (' + ','.join('?' for _ in document_ids) + ')'

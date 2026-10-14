@@ -16,6 +16,20 @@ class DocumentItem(BaseModel):
     created_at: float
     updated_at: float
     deleted_at: float | None = None
+    display_title: str | None = None
+    description: str = ''
+    author: str = ''
+    publication_year: int | None = None
+    edition: str = ''
+    material_type: str = 'unspecified'
+    favorite: bool = False
+    last_opened: float | None = None
+    metadata_version: int = 1
+    metadata_updated_at: float = 0
+    purged_at: float | None = None
+    subjects: list[dict] = Field(default_factory=list)
+    tags: list[dict] = Field(default_factory=list)
+    collections: list[dict] = Field(default_factory=list)
     chunk_count: int = 0
     job: JobItem | None = None
 

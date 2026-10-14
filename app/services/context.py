@@ -1,4 +1,5 @@
 from app.services.sync_service import SyncService
+from app.services.library_service import LibraryService
 from app.storage.database import Database
 from app.services.document_service import DocumentService
 from app.services.embedding_service import EmbeddingService
@@ -16,4 +17,6 @@ class Context:
         self.sync = SyncService(self.documents)
         self.ingestion = IngestionService(self.db, self.embedder)
         self.search = SearchService(self.db, self.embedder)
+        self.library = LibraryService(self.documents,self.search)
+        self.sync.library = self.library
         self.worker = IndexingWorker(self.db, self.ingestion)

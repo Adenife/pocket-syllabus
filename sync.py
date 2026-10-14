@@ -21,9 +21,9 @@ if __name__ == '__main__':
             client = SyncClient(Peer(args.local_url, os.getenv('POCKET_LOCAL_TOKEN', '')),
                                 Peer(args.remote_url, os.getenv('POCKET_REMOTE_TOKEN', '')), state)
             result = client.run()
-        print(f"Synchronized {result['transferred']} changes")
+        print(f"Synchronized {result['transferred']} document changes and {result.get('catalog_changes',0)} category changes")
         if result['conflicts']:
-            print('Conflicting document IDs (preserved on both sides): ' + ', '.join(result['conflicts']))
+            print('Conflicting documents/categories (preserved for review): ' + ', '.join(result['conflicts']))
             raise SystemExit(2)
     except (requests.RequestException, ValueError, OSError, portalocker.exceptions.LockException) as exc:
         parser.exit(1, f'Synchronization failed; checkpoints retained for retry: {exc}\n')

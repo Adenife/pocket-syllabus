@@ -43,6 +43,6 @@ class SearchService:
                 stored = np.frombuffer(self.db.codec.decode(row['embedding']), dtype=np.float32)
                 score = float(np.clip(np.dot(stored, vector[0]) / np.linalg.norm(stored), -1, 1))
             results.append(SearchResultItem(id=identifier, document_id=row['document_id'],
-                source_title=row['source_title'], section=row['section'], text_excerpt=row['text'], score=score,
+                source_title=row['display_source_title'], section=row['section'], text_excerpt=row['text'], score=score,
                 page=row['page'], line=row['line'], filename=row['filename']))
         return results

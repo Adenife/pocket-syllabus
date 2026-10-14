@@ -14,6 +14,8 @@ class SyncService:
             records = []
             for event in events:
                 doc = self.documents.repository.get(event['document_id'], owner, include_deleted=True)
+                if hasattr(self,'library'):
+                    doc['organization']=self.library.portable(doc)
                 records.append({'seq': event['seq'], 'action': 'delete' if doc['deleted_at'] else 'upsert', 'document': doc})
             return {'changes': records, 'cursor': events[-1]['seq'] if events else after, 'has_more': len(events) == limit}
 
@@ -67,14 +69,14 @@ class SyncService:
             conn.execute('UPDATE uploads SET offset=? WHERE id=?', (offset + len(data), identifier))
         return self.upload_status(identifier, owner)
 
-    def complete(self, identifier, owner, document_id=None, expected_version=None):
+    def complete(self, identifier, owner, document_id=None, expected_version=None, expected_metadata_version=None,preserve_trash=False):
         with self.documents.lock:
             row = self.upload_status(identifier, owner)
             if row['offset'] != row['total']:
                 raise HTTPException(409, 'Upload is incomplete')
             path = self.db.settings.upload_dir / (identifier + '.part')
             data = self.db.codec.decode(path.read_bytes())
-            result = self.documents.upload(owner, row['filename'], data, document_id, expected_version)
+            result = self.documents.upload(owner, row['filename'], data, document_id, expected_version, expected_metadata_version=expected_metadata_version,allow_trashed=preserve_trash)
             self.cancel(identifier, owner)
             return result
 
